@@ -1,55 +1,41 @@
-import multiprocessing as mp
-import requests
-from bs4 import BeautifulSoup
+import asyncio
+from typing import List
+from .crawler import Crawler
+from .governance import GovernanceNode
 
-class WebCrawler:
-    def __init__(self, start_urls, num_workers):
-        self.start_urls = start_urls
-        self.num_workers = num_workers
-        self.task_queue = mp.Queue()
-        self.result_queue = mp.Queue()
-        self.visited_urls = set()
+class HiveMindSwarm:
+    def __init__(self, nodes: List[GovernanceNode]):
+        self.nodes = nodes
+        self.crawlers = [Crawler(node) for node in nodes]
 
-    def _worker(self):
+    async def run(self):
+        await asyncio.gather(*[crawler.run() for crawler in self.crawlers])
+
+    async def distribute_tasks(self):
         while True:
-            try:
-                url = self.task_queue.get(timeout=1)
-            except:
-                break
+            await asyncio.sleep(10)
+            tasks = self.aggregate_tasks()
+            await asyncio.gather(*[node.propose_tasks(tasks) for node in self.nodes])
+            await asyncio.gather(*[node.vote_on_tasks() for node in self.nodes])
+            approved_tasks = await self.tally_votes()
+            await asyncio.gather(*[crawler.execute_tasks(approved_tasks) for crawler in self.crawlers])
 
-            try:
-                response = requests.get(url)
-                soup = BeautifulSoup(response.content, 'html.parser')
-                links = [link.get('href') for link in soup.find_all('a')]
-                self.result_queue.put((url, links))
-                self.visited_urls.add(url)
-            except:
-                self.result_queue.put((url, []))
+    def aggregate_tasks(self) -> List[dict]:
+        tasks = []
+        for crawler in self.crawlers:
+            tasks.extend(crawler.pending_tasks)
+        return tasks
 
-    def crawl(self):
-        for url in self.start_urls:
-            self.task_queue.put(url)
-
-        workers = [mp.Process(target=self._worker) for _ in range(self.num_workers)]
-        for worker in workers:
-            worker.start()
-
-        results = []
-        while len(results) < len(self.start_urls):
-            try:
-                results.append(self.result_queue.get(timeout=1))
-            except:
-                pass
-
-        for worker in workers:
-            worker.terminate()
-
-        return results
+    async def tally_votes(self) -> List[dict]:
+        approved_tasks = []
+        for task in self.aggregate_tasks():
+            if sum(node.vote_on_task(task) for node in self.nodes) > len(self.nodes) // 2:
+                approved_tasks.append(task)
+        return approved_tasks
 
 if __name__ == '__main__':
-    start_urls = ['https://www.example.com', 'https://www.google.com', 'https://www.github.com']
-    crawler = WebCrawler(start_urls, num_workers=4)
-    results = crawler.crawl()
-    for url, links in results:
-        print(f'URL: {url}')
-        print(f'Links: {links}')
+    nodes = [GovernanceNode() for _ in range(5)]
+    swarm = HiveMindSwarm(nodes)
+    asyncio.create_task(swarm.run())
+    asyncio.create_task(swarm.distribute_tasks())
+    asyncio.get_event_loop().run_forever()
