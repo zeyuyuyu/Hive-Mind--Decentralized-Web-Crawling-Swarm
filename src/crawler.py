@@ -1,83 +1,56 @@
-import redis
-import requests
-from urllib.parse import urljoin
-from bs4 import BeautifulSoup
+import asyncio
+import aiohttp
+import hashlib
 import time
-import logging
+from typing import Dict, List
+from dataclasses import dataclass
+
+@dataclass
+class CrawlResult:
+    url: str
+    content: str
+    timestamp: float
 
 class DistributedCrawler:
-    def __init__(self, redis_host='localhost', redis_port=6379):
-        self.redis_client = redis.Redis(host=redis_host, port=redis_port)
-        self.visited_key = 'visited_urls'
-        self.frontier_key = 'url_frontier'
-        self.logger = logging.getLogger(__name__)
+    def __init__(self, peers: List[str], blockchain_endpoint: str):
+        self.peers = peers
+        self.blockchain_endpoint = blockchain_endpoint
+        self.crawl_results: Dict[str, CrawlResult] = {}
+        self.lock = asyncio.Lock()
 
-    def add_url(self, url):
-        """Add URL to the distributed frontier if not already visited"""
-        if not self.redis_client.sismember(self.visited_key, url):
-            self.redis_client.lpush(self.frontier_key, url)
+    async def crawl(self, url: str) -> CrawlResult:
+        async with self.lock:
+            if url in self.crawl_results:
+                return self.crawl_results[url]
 
-    def mark_visited(self, url):
-        """Mark URL as visited in distributed set"""
-        self.redis_client.sadd(self.visited_key, url)
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url) as response:
+                    content = await response.text()
+                    timestamp = time.time()
+                    crawl_result = CrawlResult(url=url, content=content, timestamp=timestamp)
+                    self.crawl_results[url] = crawl_result
 
-    def get_next_url(self):
-        """Get next URL from distributed frontier"""
-        return self.redis_client.rpop(self.frontier_key)
+                    # Broadcast the crawl result to the blockchain network
+                    await self.broadcast_crawl_result(crawl_result)
 
-    def crawl(self, start_url, max_pages=100):
-        """Distributed crawling with Redis-based frontier"""
-        self.add_url(start_url)
-        pages_crawled = 0
+                    return crawl_result
 
-        while pages_crawled < max_pages:
-            url = self.get_next_url()
-            if not url:
-                break
-
-            url = url.decode('utf-8')
-            if self.redis_client.sismember(self.visited_key, url):
-                continue
-
-            try:
-                self.logger.info(f'Crawling: {url}')
-                response = requests.get(url, timeout=10)
-                if response.status_code == 200:
-                    soup = BeautifulSoup(response.text, 'html.parser')
-                    
-                    # Extract and store content
-                    title = soup.title.string if soup.title else 'No title'
-                    self.redis_client.hset('page_contents', url, title)
-
-                    # Extract and queue new links
-                    for link in soup.find_all('a'):
-                        href = link.get('href')
-                        if href:
-                            absolute_url = urljoin(url, href)
-                            if absolute_url.startswith('http'):
-                                self.add_url(absolute_url)
-
-                    pages_crawled += 1
-                    self.mark_visited(url)
-                    
-                time.sleep(1)  # Polite crawling
-
-            except Exception as e:
-                self.logger.error(f'Error crawling {url}: {str(e)}')
-                continue
-
-        return pages_crawled
-
-    def get_stats(self):
-        """Get crawler statistics"""
-        return {
-            'visited_urls': self.redis_client.scard(self.visited_key),
-            'queued_urls': self.redis_client.llen(self.frontier_key),
-            'stored_contents': self.redis_client.hlen('page_contents')
+    async def broadcast_crawl_result(self, crawl_result: CrawlResult):
+        payload = {
+            'url': crawl_result.url,
+            'content': crawl_result.content,
+            'timestamp': crawl_result.timestamp,
+            'hash': self.compute_hash(crawl_result)
         }
 
-    def clear_all(self):
-        """Reset all crawler data"""
-        self.redis_client.delete(self.visited_key)
-        self.redis_client.delete(self.frontier_key)
-        self.redis_client.delete('page_contents')
+        for peer in self.peers:
+            async with aiohttp.ClientSession() as session:
+                await session.post(f'{peer}/crawl_result', json=payload)
+
+        # Submit the crawl result to the blockchain
+        async with aiohttp.ClientSession() as session:
+            await session.post(self.blockchain_endpoint, json=payload)
+
+    def compute_hash(self, crawl_result: CrawlResult) -> str:
+        data = f'{crawl_result.url}{crawl_result.content}{crawl_result.timestamp}'.encode()
+        return hashlib.sha256(data).hexdigest()
