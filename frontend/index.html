@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SwarmVerse - Join the Collective Intelligence!</title>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    <style>
+        .swarm-particle { transition: all 0.3s ease-in-out; }
+        .achievement-popup { animation: popup 0.5s ease-out; }
+        @keyframes popup { 0% {transform: scale(0);} 100% {transform: scale(1);} }
+    </style>
+</head>
+<body class="bg-gray-900 text-white">
+    <div class="fixed top-0 right-0 p-4">
+        <div class="text-2xl font-bold">🏆 Score: <span id="score">0</span></div>
+        <div class="text-sm">Level: <span id="level">1</span></div>
+    </div>
+    
+    <div class="container mx-auto px-4 py-8">
+        <h1 class="text-5xl font-bold text-center mb-8 bg-clip-text text-transparent bg-gradient-to-r from-purple-400 to-pink-600">SwarmVerse</h1>
+        
+        <div class="relative w-full h-[600px] bg-gray-800 rounded-lg overflow-hidden shadow-2xl">
+            <canvas id="swarmCanvas" class="w-full h-full"></canvas>
+            <div id="particles" class="absolute inset-0"></div>
+        </div>
+
+        <div class="mt-8 grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div class="bg-gray-800 p-4 rounded-lg">
+                <h3 class="text-xl font-bold mb-2">🌟 Your Achievements</h3>
+                <div id="achievements" class="space-y-2"></div>
+            </div>
+            
+            <div class="bg-gray-800 p-4 rounded-lg">
+                <h3 class="text-xl font-bold mb-2">🏃‍♂️ Global Leaderboard</h3>
+                <div id="leaderboard" class="space-y-2"></div>
+            </div>
+
+            <div class="bg-gray-800 p-4 rounded-lg">
+                <h3 class="text-xl font-bold mb-2">🎮 Controls</h3>
+                <button onclick="spawnSwarm()" class="w-full bg-purple-600 hover:bg-purple-700 text-white font-bold py-2 px-4 rounded">Spawn Swarm</button>
+                <button onclick="evolveSwarm()" class="w-full mt-2 bg-pink-600 hover:bg-pink-700 text-white font-bold py-2 px-4 rounded">Evolve Swarm</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let score = 0;
+        let level = 1;
+        
+        function spawnSwarm() {
+            score += Math.floor(Math.random() * 100);
+            document.getElementById('score').textContent = score;
+            showAchievement('Swarm Spawned! +100 points');
+            
+            if (score > level * 1000) {
+                level++;
+                document.getElementById('level').textContent = level;
+                showAchievement('🎉 Level Up! You reached level ' + level);
+            }
+            
+            // Animate particles
+            const particles = document.getElementById('particles');
+            for (let i = 0; i < 20; i++) {
+                const particle = document.createElement('div');
+                particle.className = 'swarm-particle absolute w-2 h-2 bg-purple-400 rounded-full';
+                particle.style.left = Math.random() * 100 + '%';
+                particle.style.top = Math.random() * 100 + '%';
+                particles.appendChild(particle);
+                setTimeout(() => particle.remove(), 2000);
+            }
+        }
+
+        function evolveSwarm() {
+            score += Math.floor(Math.random() * 200);
+            document.getElementById('score').textContent = score;
+            showAchievement('Swarm Evolved! +200 points');
+        }
+
+        function showAchievement(message) {
+            const achievement = document.createElement('div');
+            achievement.className = 'achievement-popup bg-gradient-to-r from-purple-500 to-pink-500 p-2 rounded mb-2';
+            achievement.textContent = message;
+            document.getElementById('achievements').prepend(achievement);
+            setTimeout(() => achievement.remove(), 3000);
+        }
+
+        // Initialize canvas visualization
+        const canvas = document.getElementById('swarmCanvas');
+        const ctx = canvas.getContext('2d');
+        canvas.width = canvas.offsetWidth;
+        canvas.height = canvas.offsetHeight;
+
+        function animate() {
+            ctx.fillStyle = 'rgba(17, 24, 39, 0.1)';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            requestAnimationFrame(animate);
+        }
+        animate();
+
+        // Simulated leaderboard data
+        const leaderboardData = [
+            {name: '🥇 SwarmMaster', score: 12500},
+            {name: '🥈 SwarmNinja', score: 10200},
+            {name: '🥉 SwarmLord', score: 9800}
+        ];
+
+        const leaderboard = document.getElementById('leaderboard');
+        leaderboardData.forEach(entry => {
+            const div = document.createElement('div');
+            div.className = 'flex justify-between items-center';
+            div.innerHTML = `<span>${entry.name}</span><span>${entry.score}</span>`;
+            leaderboard.appendChild(div);
+        });
+    </script>
+</body>
+</html>
