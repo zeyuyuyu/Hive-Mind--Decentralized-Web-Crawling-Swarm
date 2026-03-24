@@ -1,72 +1,83 @@
-import mmh3
-from bitarray import bitarray
-from typing import List, Set
-from urllib.parse import urlparse
 import redis
+import requests
+from urllib.parse import urljoin
+from bs4 import BeautifulSoup
+import time
+import logging
 
-class DistributedFrontier:
+class DistributedCrawler:
     def __init__(self, redis_host='localhost', redis_port=6379):
-        self.redis = redis.Redis(host=redis_host, port=redis_port)
-        self.bloom_filter = BloomFilter(capacity=10000000, error_rate=0.01)
-    
-    def add_urls(self, urls: List[str]) -> None:
-        """Add new URLs to the distributed frontier"""
-        for url in urls:
-            if not self.bloom_filter.contains(url):
-                self.bloom_filter.add(url)
-                normalized_url = self._normalize_url(url)
-                domain = urlparse(normalized_url).netloc
-                self.redis.lpush(f'frontier:{domain}', normalized_url)
-    
-    def get_next_urls(self, batch_size: int = 100) -> List[str]:
-        """Get next batch of URLs to crawl, balanced across domains"""
-        domains = self.redis.keys('frontier:*')
-        if not domains:
-            return []
-        
-        urls = []
-        urls_per_domain = max(1, batch_size // len(domains))
-        
-        for domain in domains:
-            domain_urls = self.redis.lrange(domain, 0, urls_per_domain - 1)
-            self.redis.ltrim(domain, urls_per_domain, -1)
-            urls.extend([url.decode() for url in domain_urls])
-        
-        return urls[:batch_size]
-    
-    def _normalize_url(self, url: str) -> str:
-        """Normalize URL to avoid duplicates"""
-        parsed = urlparse(url)
-        return f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+        self.redis_client = redis.Redis(host=redis_host, port=redis_port)
+        self.visited_key = 'visited_urls'
+        self.frontier_key = 'url_frontier'
+        self.logger = logging.getLogger(__name__)
 
-class BloomFilter:
-    def __init__(self, capacity: int, error_rate: float):
-        """Initialize Bloom Filter with given capacity and error rate"""
-        self.size = self._get_size(capacity, error_rate)
-        self.hash_count = self._get_hash_count(self.size, capacity)
-        self.bit_array = bitarray(self.size)
-        self.bit_array.setall(0)
-    
-    def add(self, item: str) -> None:
-        """Add an item to the Bloom Filter"""
-        for seed in range(self.hash_count):
-            index = mmh3.hash(item, seed) % self.size
-            self.bit_array[index] = 1
-    
-    def contains(self, item: str) -> bool:
-        """Check if an item might be in the Bloom Filter"""
-        for seed in range(self.hash_count):
-            index = mmh3.hash(item, seed) % self.size
-            if not self.bit_array[index]:
-                return False
-        return True
-    
-    @staticmethod
-    def _get_size(capacity: int, error_rate: float) -> int:
-        """Calculate optimal bit array size"""
-        return int(-capacity * math.log(error_rate) / (math.log(2) ** 2))
-    
-    @staticmethod
-    def _get_hash_count(size: int, capacity: int) -> int:
-        """Calculate optimal number of hash functions"""
-        return int(size / capacity * math.log(2))
+    def add_url(self, url):
+        """Add URL to the distributed frontier if not already visited"""
+        if not self.redis_client.sismember(self.visited_key, url):
+            self.redis_client.lpush(self.frontier_key, url)
+
+    def mark_visited(self, url):
+        """Mark URL as visited in distributed set"""
+        self.redis_client.sadd(self.visited_key, url)
+
+    def get_next_url(self):
+        """Get next URL from distributed frontier"""
+        return self.redis_client.rpop(self.frontier_key)
+
+    def crawl(self, start_url, max_pages=100):
+        """Distributed crawling with Redis-based frontier"""
+        self.add_url(start_url)
+        pages_crawled = 0
+
+        while pages_crawled < max_pages:
+            url = self.get_next_url()
+            if not url:
+                break
+
+            url = url.decode('utf-8')
+            if self.redis_client.sismember(self.visited_key, url):
+                continue
+
+            try:
+                self.logger.info(f'Crawling: {url}')
+                response = requests.get(url, timeout=10)
+                if response.status_code == 200:
+                    soup = BeautifulSoup(response.text, 'html.parser')
+                    
+                    # Extract and store content
+                    title = soup.title.string if soup.title else 'No title'
+                    self.redis_client.hset('page_contents', url, title)
+
+                    # Extract and queue new links
+                    for link in soup.find_all('a'):
+                        href = link.get('href')
+                        if href:
+                            absolute_url = urljoin(url, href)
+                            if absolute_url.startswith('http'):
+                                self.add_url(absolute_url)
+
+                    pages_crawled += 1
+                    self.mark_visited(url)
+                    
+                time.sleep(1)  # Polite crawling
+
+            except Exception as e:
+                self.logger.error(f'Error crawling {url}: {str(e)}')
+                continue
+
+        return pages_crawled
+
+    def get_stats(self):
+        """Get crawler statistics"""
+        return {
+            'visited_urls': self.redis_client.scard(self.visited_key),
+            'queued_urls': self.redis_client.llen(self.frontier_key),
+            'stored_contents': self.redis_client.hlen('page_contents')
+        }
+
+    def clear_all(self):
+        """Reset all crawler data"""
+        self.redis_client.delete(self.visited_key)
+        self.redis_client.delete(self.frontier_key)
+        self.redis_client.delete('page_contents')
