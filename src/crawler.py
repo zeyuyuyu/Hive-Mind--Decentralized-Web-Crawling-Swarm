@@ -1,56 +1,102 @@
 import asyncio
+from urllib.parse import urlparse
 import aiohttp
-import hashlib
 import time
-from typing import Dict, List
-from dataclasses import dataclass
-
-@dataclass
-class CrawlResult:
-    url: str
-    content: str
-    timestamp: float
+from collections import defaultdict
 
 class DistributedCrawler:
-    def __init__(self, peers: List[str], blockchain_endpoint: str):
-        self.peers = peers
-        self.blockchain_endpoint = blockchain_endpoint
-        self.crawl_results: Dict[str, CrawlResult] = {}
-        self.lock = asyncio.Lock()
+    def __init__(self, max_concurrent=10):
+        self.max_concurrent = max_concurrent
+        self.seen_urls = set()
+        self.queue = asyncio.Queue()
+        self.domain_timestamps = defaultdict(list)
+        self.domain_delay = 1.0  # Minimum delay between requests to same domain
+        self.session = None
 
-    async def crawl(self, url: str) -> CrawlResult:
-        async with self.lock:
-            if url in self.crawl_results:
-                return self.crawl_results[url]
+    async def init_session(self):
+        if not self.session:
+            self.session = aiohttp.ClientSession()
 
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url) as response:
+    async def close(self):
+        if self.session:
+            await self.session.close()
+
+    def can_crawl_domain(self, domain):
+        """Rate limiting check for domain"""
+        now = time.time()
+        timestamps = self.domain_timestamps[domain]
+        
+        # Clean old timestamps
+        while timestamps and timestamps[0] < now - 60:
+            timestamps.pop(0)
+            
+        # Check if enough time passed since last request
+        if timestamps and (now - timestamps[-1]) < self.domain_delay:
+            return False
+            
+        return len(timestamps) < 60  # Max 60 requests per minute per domain
+
+    async def add_url(self, url):
+        if url not in self.seen_urls:
+            self.seen_urls.add(url)
+            await self.queue.put(url)
+
+    async def crawl_url(self, url):
+        """Crawl a single URL with rate limiting"""
+        domain = urlparse(url).netloc
+        
+        if not self.can_crawl_domain(domain):
+            # Re-queue for later if rate limited
+            await self.queue.put(url)
+            return None
+
+        try:
+            await self.init_session()
+            async with self.session.get(url) as response:
+                if response.status == 200:
                     content = await response.text()
-                    timestamp = time.time()
-                    crawl_result = CrawlResult(url=url, content=content, timestamp=timestamp)
-                    self.crawl_results[url] = crawl_result
+                    self.domain_timestamps[domain].append(time.time())
+                    return content
+        except Exception as e:
+            print(f"Error crawling {url}: {str(e)}")
+        return None
 
-                    # Broadcast the crawl result to the blockchain network
-                    await self.broadcast_crawl_result(crawl_result)
+    async def worker(self):
+        """Worker process that continuously pulls from queue"""
+        while True:
+            url = await self.queue.get()
+            try:
+                content = await self.crawl_url(url)
+                if content:
+                    # Process content here
+                    print(f"Successfully crawled: {url}")
+            finally:
+                self.queue.task_done()
 
-                    return crawl_result
+    async def run(self, seed_urls):
+        """Main crawler entry point"""
+        # Add seed URLs to queue
+        for url in seed_urls:
+            await self.add_url(url)
 
-    async def broadcast_crawl_result(self, crawl_result: CrawlResult):
-        payload = {
-            'url': crawl_result.url,
-            'content': crawl_result.content,
-            'timestamp': crawl_result.timestamp,
-            'hash': self.compute_hash(crawl_result)
-        }
+        # Start workers
+        workers = []
+        for _ in range(self.max_concurrent):
+            worker = asyncio.create_task(self.worker())
+            workers.append(worker)
 
-        for peer in self.peers:
-            async with aiohttp.ClientSession() as session:
-                await session.post(f'{peer}/crawl_result', json=payload)
+        # Wait for queue to be fully processed
+        await self.queue.join()
 
-        # Submit the crawl result to the blockchain
-        async with aiohttp.ClientSession() as session:
-            await session.post(self.blockchain_endpoint, json=payload)
+        # Cancel workers
+        for worker in workers:
+            worker.cancel()
 
-    def compute_hash(self, crawl_result: CrawlResult) -> str:
-        data = f'{crawl_result.url}{crawl_result.content}{crawl_result.timestamp}'.encode()
-        return hashlib.sha256(data).hexdigest()
+        # Cleanup
+        await self.close()
+
+if __name__ == "__main__":
+    # Example usage
+    crawler = DistributedCrawler(max_concurrent=5)
+    seed_urls = [
+        "http://example.com\
